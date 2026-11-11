@@ -36,6 +36,11 @@ static void SavePreferredRate(double hz) {
     }
 }
 
+static NSString * const kRepo    = @"dialup-audio/sample-rate-display";
+static NSString * const kSiteURL = @"https://dialup.audio";
+static NSString * const kLastUpdateCheckKey = @"lastUpdateCheck";
+static const NSTimeInterval kUpdateCheckInterval = 24 * 60 * 60;
+
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     return { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 }
@@ -43,8 +48,18 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSMenuItem *deviceItem;
-@property (strong) NSMenu *rateMenu;
+@property (strong) NSMenu *setRateMenu;
+@property (strong) NSMenu *alertMenu;
+@property (strong) NSMenuItem *alertParent;
+@property (strong) NSMenuItem *updateItem;
+@property (copy) NSString *updateURL;
 @property double preferredRate;
+// While a rate change we initiated is in flight, the alert is suppressed so the
+// menubar item doesn't flash red between "clicked" and "device actually switched".
+@property BOOL switching;
+@property double switchTarget;
+@property double switchPrevPreferred;
+@property NSUInteger switchGeneration;
 @property AudioDeviceID device;
 @property (copy) AudioObjectPropertyListenerBlock rateListener;
 @end
@@ -60,19 +75,47 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 
     NSMenu *menu = [[NSMenu alloc] init];
 
+    // Hidden until an update check finds a newer release.
+    self.updateItem = [[NSMenuItem alloc] initWithTitle:@"Update available"
+                                                 action:@selector(openUpdate:)
+                                          keyEquivalent:@""];
+    self.updateItem.target = self;
+    self.updateItem.hidden = YES;
+    [menu addItem:self.updateItem];
+
     self.deviceItem = [[NSMenuItem alloc] initWithTitle:@"No output device"
                                                  action:nil keyEquivalent:@""];
     [menu addItem:self.deviceItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
-    // "Expected sample rate": the menubar item turns red when the device is running at anything else.
-    // Populated per-device in rebuildRateMenu.
-    self.rateMenu = [[NSMenu alloc] init];
+    // Both submenus are populated per-device in rebuildMenus.
+    // "Sample rate": changes the device's rate.
+    self.setRateMenu = [[NSMenu alloc] init];
+    NSMenuItem *setParent = [[NSMenuItem alloc] initWithTitle:@"Set sample rate to…"
+                                                       action:nil keyEquivalent:@""];
+    setParent.submenu = self.setRateMenu;
+    [menu addItem:setParent];
 
-    NSMenuItem *rateParent = [[NSMenuItem alloc] initWithTitle:@"Expected sample rate"
-                                                        action:nil keyEquivalent:@""];
-    rateParent.submenu = self.rateMenu;
-    [menu addItem:rateParent];
+    // "Alert if not…": the menubar item turns red when the device is running at anything else.
+    self.alertMenu = [[NSMenu alloc] init];
+    self.alertParent = [[NSMenuItem alloc] initWithTitle:@"Alert if not…"
+                                                  action:nil keyEquivalent:@""];
+    self.alertParent.submenu = self.alertMenu;
+    [menu addItem:self.alertParent];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *about = [[NSMenuItem alloc]
+        initWithTitle:[NSString stringWithFormat:@"About %@", self.appName]
+               action:@selector(showAbout:)
+        keyEquivalent:@""];
+    about.target = self;
+    [menu addItem:about];
+
+    NSMenuItem *check = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+                                                   action:@selector(checkForUpdatesManually:)
+                                            keyEquivalent:@""];
+    check.target = self;
+    [menu addItem:check];
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit"
@@ -90,7 +133,125 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     });
 
     [self attachToDefaultDevice];
+    [self checkForUpdatesIfDue];
 }
+
+- (NSString *)appName {
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: @"DialUp kHzDisp";
+}
+
+- (NSString *)appVersion {
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0.0.0";
+}
+
+- (void)showAbout:(id)sender {
+    NSString *text = @"Free tools by dialup.audio";
+    NSMutableAttributedString *credits = [[NSMutableAttributedString alloc] initWithString:text];
+
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    [credits addAttributes:@{ NSParagraphStyleAttributeName: para,
+                              NSFontAttributeName: [NSFont systemFontOfSize:11],
+                              NSForegroundColorAttributeName: NSColor.labelColor }
+                     range:NSMakeRange(0, text.length)];
+    [credits addAttribute:NSLinkAttributeName
+                    value:[NSURL URLWithString:kSiteURL]
+                    range:[text rangeOfString:@"dialup.audio"]];
+
+    [NSApp activateIgnoringOtherApps:YES];
+    [NSApp orderFrontStandardAboutPanelWithOptions:@{ NSAboutPanelOptionCredits: credits }];
+}
+
+#pragma mark - Updates
+
+- (void)checkForUpdatesIfDue {
+    NSDate *last = [[NSUserDefaults standardUserDefaults] objectForKey:kLastUpdateCheckKey];
+    if (last && -[last timeIntervalSinceNow] < kUpdateCheckInterval) return;
+    [self checkForUpdatesUserInitiated:NO];
+}
+
+- (void)checkForUpdatesManually:(id)sender {
+    [self checkForUpdatesUserInitiated:YES];
+}
+
+- (void)alert:(NSString *)message info:(NSString *)info downloadURL:(NSString *)url {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = message;
+    alert.informativeText = info;
+    if (url) {
+        [alert addButtonWithTitle:@"Download"];
+        [alert addButtonWithTitle:@"Later"];
+    }
+    [NSApp activateIgnoringOtherApps:YES];
+    if ([alert runModal] == NSAlertFirstButtonReturn && url) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:url]];
+    }
+}
+
+// Notify-only: asks GitHub for the latest release and, if it's newer, offers to open the
+// release page. The user downloads and installs it themselves.
+- (void)checkForUpdatesUserInitiated:(BOOL)manual {
+    NSURL *url = [NSURL URLWithString:
+        [NSString stringWithFormat:@"https://api.github.com/repos/%@/releases/latest", kRepo]];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 15;
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"dialup-audio-sample-rate-display" forHTTPHeaderField:@"User-Agent"];
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+        id json = (!error && data && status == 200)
+            ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSString *tag = [json isKindOfClass:[NSDictionary class]] ? json[@"tag_name"] : nil;
+        NSString *page = [json isKindOfClass:[NSDictionary class]] ? json[@"html_url"] : nil;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![tag isKindOfClass:[NSString class]]) {
+                NSLog(@"update check failed (status %ld): %@", (long)status, error);
+                if (manual) {
+                    [self alert:@"Couldn't check for updates"
+                           info:@"Check your internet connection and try again."
+                    downloadURL:nil];
+                }
+                return;
+            }
+
+            [[NSUserDefaults standardUserDefaults] setObject:[NSDate date]
+                                                      forKey:kLastUpdateCheckKey];
+
+            NSString *latest = [tag hasPrefix:@"v"] ? [tag substringFromIndex:1] : tag;
+            BOOL newer = [latest compare:[self appVersion] options:NSNumericSearch]
+                         == NSOrderedDescending;
+
+            if (newer) {
+                self.updateURL = [page isKindOfClass:[NSString class]] ? page
+                    : [NSString stringWithFormat:@"https://github.com/%@/releases/latest", kRepo];
+                self.updateItem.title = [NSString stringWithFormat:@"Update available: v%@…", latest];
+                self.updateItem.hidden = NO;
+                if (manual) {
+                    [self alert:[NSString stringWithFormat:@"Version %@ is available", latest]
+                           info:[NSString stringWithFormat:@"You have version %@.", [self appVersion]]
+                    downloadURL:self.updateURL];
+                }
+            } else if (manual) {
+                [self alert:@"You're up to date"
+                       info:[NSString stringWithFormat:@"%@ %@ is the latest version.",
+                             [self appName], [self appVersion]]
+                downloadURL:nil];
+            }
+        });
+    }];
+    [task resume];
+}
+
+- (void)openUpdate:(id)sender {
+    if (self.updateURL) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:self.updateURL]];
+    }
+}
+
+#pragma mark - Sample rate
 
 - (NSString *)formatRate:(double)hz {
     return [NSString stringWithFormat:@"%g kHz", hz / 1000.0];
@@ -133,10 +294,24 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     return [rates.allObjects sortedArrayUsingSelector:@selector(compare:)];
 }
 
-- (void)rebuildRateMenu {
-    [self.rateMenu removeAllItems];
+- (void)rebuildMenus {
+    [self.alertMenu removeAllItems];
+    [self.setRateMenu removeAllItems];
 
-    NSMutableArray<NSNumber *> *rates = [[self supportedRates] mutableCopy];
+    NSArray<NSNumber *> *supported = [self supportedRates];
+    for (NSNumber *hz in supported) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[self formatRate:hz.doubleValue]
+                                                      action:@selector(setDeviceRate:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = hz;
+        [self.setRateMenu addItem:item];
+    }
+    if (supported.count == 0) {
+        [self.setRateMenu addItemWithTitle:@"No rates available" action:nil keyEquivalent:@""];
+    }
+
+    NSMutableArray<NSNumber *> *rates = [supported mutableCopy];
 
     // Keep a saved preference selectable even if this device doesn't list it,
     // so switching devices never silently drops the setting.
@@ -145,13 +320,13 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
         [rates sortUsingSelector:@selector(compare:)];
     }
 
-    NSMenuItem *none = [[NSMenuItem alloc] initWithTitle:@"None"
+    NSMenuItem *none = [[NSMenuItem alloc] initWithTitle:@"Off"
                                                   action:@selector(selectRate:)
                                            keyEquivalent:@""];
     none.target = self;
     none.representedObject = @0;
-    [self.rateMenu addItem:none];
-    [self.rateMenu addItem:[NSMenuItem separatorItem]];
+    [self.alertMenu addItem:none];
+    [self.alertMenu addItem:[NSMenuItem separatorItem]];
 
     for (NSNumber *hz in rates) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[self formatRate:hz.doubleValue]
@@ -159,24 +334,103 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
                                                keyEquivalent:@""];
         item.target = self;
         item.representedObject = hz;
-        [self.rateMenu addItem:item];
+        [self.alertMenu addItem:item];
     }
 
-    [self updateRateMenuChecks];
+    [self updateAlertMenuChecks];
 }
 
-- (void)updateRateMenuChecks {
-    for (NSMenuItem *item in self.rateMenu.itemArray) {
+- (void)updateAlertMenuChecks {
+    // Parent title reads as a sentence: "Alert if not 96 kHz" / "Alert: Off"
+    self.alertParent.title = self.preferredRate > 0
+        ? [NSString stringWithFormat:@"Alert if not %@", [self formatRate:self.preferredRate]]
+        : @"Alert: Off";
+
+    for (NSMenuItem *item in self.alertMenu.itemArray) {
         if (!item.representedObject) continue;
         item.state = ([item.representedObject doubleValue] == self.preferredRate)
             ? NSControlStateValueOn : NSControlStateValueOff;
     }
 }
 
+// Checkmark on the rate the device is actually running at.
+- (void)updateSetRateMenuChecks:(Float64)currentRate {
+    for (NSMenuItem *item in self.setRateMenu.itemArray) {
+        if (!item.representedObject) continue;
+        item.state = (fabs([item.representedObject doubleValue] - currentRate) < 0.5)
+            ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+
+// Ends the suppression window. On failure, put the alert rate back how it was.
+// Doesn't refresh; callers do that when they need to.
+- (void)finishSwitchSuccess:(BOOL)success {
+    if (!self.switching) return;
+    self.switching = NO;
+    self.switchGeneration++;
+
+    if (!success && self.preferredRate != self.switchPrevPreferred) {
+        self.preferredRate = self.switchPrevPreferred;
+        SavePreferredRate(self.preferredRate);
+        [self updateAlertMenuChecks];
+    }
+}
+
+- (void)setDeviceRate:(NSMenuItem *)sender {
+    Float64 hz = [sender.representedObject doubleValue];
+
+    NSUInteger generation = ++self.switchGeneration;
+    self.switching = YES;
+    self.switchTarget = hz;
+    self.switchPrevPreferred = self.preferredRate;
+
+    // If an alert rate is set, keep it in step with the rate being chosen.
+    if (self.preferredRate > 0) {
+        self.preferredRate = hz;
+        SavePreferredRate(hz);
+        [self updateAlertMenuChecks];
+    }
+
+    AudioObjectPropertyAddress addr = Addr(kAudioDevicePropertyNominalSampleRate);
+    Boolean settable = false;
+    OSStatus err = AudioObjectIsPropertySettable(self.device, &addr, &settable);
+    if (err == noErr && settable) {
+        err = AudioObjectSetPropertyData(self.device, &addr, 0, NULL, sizeof(hz), &hz);
+    } else if (err == noErr) {
+        err = kAudioHardwareIllegalOperationError;
+    }
+
+    if (err != noErr) {
+        NSLog(@"couldn't set sample rate to %.0f: %d", hz, (int)err);
+        [self finishSwitchSuccess:NO];
+        [self refresh];
+
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = [NSString stringWithFormat:@"Couldn't switch to %@", [self formatRate:hz]];
+        alert.informativeText = @"This device may be controlled by its driver, or in use by an app that needs its current rate.";
+        [NSApp activateIgnoringOtherApps:YES];
+        [alert runModal];
+        return;
+    }
+
+    // Success is detected in refresh (the rate listener fires when the device lands on the
+    // target). If that never happens, give up after a few seconds and revert.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.switching && self.switchGeneration == generation) {
+            NSLog(@"timed out waiting for device to switch to %.0f", hz);
+            [self finishSwitchSuccess:NO];
+            [self refresh];
+        }
+    });
+
+    [self refresh];
+}
+
 - (void)selectRate:(NSMenuItem *)sender {
     self.preferredRate = [sender.representedObject doubleValue];
     SavePreferredRate(self.preferredRate);
-    [self updateRateMenuChecks];
+    [self updateAlertMenuChecks];
     [self refresh];
 }
 
@@ -211,7 +465,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
                                             dispatch_get_main_queue(), self.rateListener);
     }
 
-    [self rebuildRateMenu];
+    [self rebuildMenus];
     [self refresh];
 }
 
@@ -237,13 +491,19 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 
     if (err != noErr || rate <= 0) {
         self.statusItem.button.title = @"? kHz";
+        [self updateSetRateMenuChecks:0];
         return;
+    }
+    [self updateSetRateMenuChecks:rate];
+
+    if (self.switching && fabs(rate - self.switchTarget) < 0.5) {
+        [self finishSwitchSuccess:YES];
     }
 
     NSString *text = [self formatRate:rate];
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:text];
 
-    if (self.preferredRate > 0 && fabs(rate - self.preferredRate) > 0.5) {
+    if (!self.switching && self.preferredRate > 0 && fabs(rate - self.preferredRate) > 0.5) {
         [title addAttribute:NSBackgroundColorAttributeName
                       value:NSColor.systemRedColor
                       range:NSMakeRange(0, text.length)];

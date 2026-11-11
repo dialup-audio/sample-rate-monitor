@@ -1,3 +1,4 @@
+.PHONY: build run clean
 .DEFAULT_GOAL := build
 BUILD_DIR := build
 
