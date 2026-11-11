@@ -2,8 +2,8 @@
 #import <CoreAudio/CoreAudio.h>
 
 // The alert rate (Hz) lives in NSUserDefaults under this key; 0 / unset means "no alert".
-//   defaults read audio.dialup.khz-display alertRate
-//   defaults delete audio.dialup.khz-display
+//   defaults read audio.dialup.sample-rate-monitor alertRate
+//   defaults delete audio.dialup.sample-rate-monitor
 static NSString * const kAlertRateKey = @"alertRate";
 
 static double LoadPreferredRate(void) {
@@ -20,12 +20,12 @@ static void SavePreferredRate(double hz) {
     }
 }
 
-static NSString * const kRepo    = @"dialup-audio/khz-display";
+static NSString * const kRepo    = @"dialup-audio/sample-rate-monitor";
 static NSString * const kSiteURL = @"https://dialup.audio";
 // Links go through dialup.audio (which redirects to GitHub for now) so they can be
 // repointed later without shipping a new version.
-static NSString * const kHelpURL     = @"https://dialup.audio/khz-display";
-static NSString * const kIssuesURL   = @"https://dialup.audio/khz-display/issues";
+static NSString * const kHelpURL     = @"https://dialup.audio/sample-rate-monitor";
+static NSString * const kIssuesURL   = @"https://dialup.audio/sample-rate-monitor/issues";
 static NSString * const kCheckOnStartupKey = @"checkUpdatesOnStartup";
 
 // Unset until the user answers the first-launch question.
@@ -136,7 +136,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 }
 
 - (NSString *)appName {
-    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: @"kHz Display";
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: @"Sample Rate Monitor";
 }
 
 - (NSString *)appVersion {
@@ -223,7 +223,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = 15;
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"dialup-audio-khz-display" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"dialup-audio-sample-rate-monitor" forHTTPHeaderField:@"User-Agent"];
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
