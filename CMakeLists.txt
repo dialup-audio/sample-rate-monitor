@@ -21,5 +21,5 @@ set_target_properties(sample-rate-display PROPERTIES
     MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0.0"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
     MACOSX_BUNDLE_BUNDLE_NAME "kHzDisp"
-    MACOSX_BUNDLE_GUI_IDENTIFIER "dialup.audio.khzdisp"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "audio.dialup.khzdisp"
 )

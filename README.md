@@ -37,14 +37,15 @@ make run
 
 ## Settings
 
-The alert rate is stored as plain text in:
+The alert rate is stored in the app's standard macOS preferences, nothing else is written to disk:
 
-```
-~/Library/dialup.audio/sample-rate-display
+```bash
+defaults read audio.dialup.khzdisp alertRate      # e.g. 96000
+defaults delete audio.dialup.khzdisp              # reset
 ```
 
-e.g. `96000`. Delete the file (or choose **Off**) to disable the alert.
+Choosing **Off** in the menu clears it too.
 
 ## Updates
 
-On launch (at most once a day) the app asks GitHub whether a newer release exists. If so, an "Update available" item shows up in the menu and opens the release page. Nothing is downloaded or installed automatically. **Check for Updates…** does it on demand. That's the only network request the app makes.
+The app never touches the internet on its own. **Check for Updates…** asks GitHub whether a newer release exists and, if so, offers to open the release page. Nothing is downloaded or installed automatically. That click is the only network request the app makes.

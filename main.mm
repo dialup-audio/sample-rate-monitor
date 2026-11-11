@@ -1,45 +1,27 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreAudio/CoreAudio.h>
 
-// Preferred sample rate is stored as plain text (Hz, e.g. "96000") in this file.
-// No file (or an unparseable one) means "no preference": nothing gets highlighted.
-static NSString *PrefPath(void) {
-    return [NSHomeDirectory() stringByAppendingPathComponent:
-            @"Library/dialup.audio/sample-rate-display"];
-}
+// The alert rate (Hz) lives in NSUserDefaults under this key; 0 / unset means "no alert".
+//   defaults read audio.dialup.khzdisp alertRate
+//   defaults delete audio.dialup.khzdisp
+static NSString * const kAlertRateKey = @"alertRate";
 
 static double LoadPreferredRate(void) {
-    NSString *s = [NSString stringWithContentsOfFile:PrefPath()
-                                            encoding:NSUTF8StringEncoding
-                                               error:nil];
-    double hz = s.doubleValue;
+    double hz = [[NSUserDefaults standardUserDefaults] doubleForKey:kAlertRateKey];
     return hz > 0 ? hz : 0;
 }
 
 static void SavePreferredRate(double hz) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *path = PrefPath();
-
-    if (hz <= 0) {
-        [fm removeItemAtPath:path error:nil];
-        return;
-    }
-
-    NSError *error = nil;
-    [fm createDirectoryAtPath:path.stringByDeletingLastPathComponent
-  withIntermediateDirectories:YES attributes:nil error:&error];
-    if (error) { NSLog(@"couldn't create pref dir: %@", error); return; }
-
-    NSString *text = [NSString stringWithFormat:@"%.0f\n", hz];
-    if (![text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
-        NSLog(@"couldn't save preference: %@", error);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (hz > 0) {
+        [defaults setDouble:hz forKey:kAlertRateKey];
+    } else {
+        [defaults removeObjectForKey:kAlertRateKey];
     }
 }
 
 static NSString * const kRepo    = @"dialup-audio/sample-rate-display";
 static NSString * const kSiteURL = @"https://dialup.audio";
-static NSString * const kLastUpdateCheckKey = @"lastUpdateCheck";
-static const NSTimeInterval kUpdateCheckInterval = 24 * 60 * 60;
 
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     return { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
@@ -51,8 +33,6 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 @property (strong) NSMenu *setRateMenu;
 @property (strong) NSMenu *alertMenu;
 @property (strong) NSMenuItem *alertParent;
-@property (strong) NSMenuItem *updateItem;
-@property (copy) NSString *updateURL;
 @property double preferredRate;
 // While a rate change we initiated is in flight, the alert is suppressed so the
 // menubar item doesn't flash red between "clicked" and "device actually switched".
@@ -74,14 +54,6 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     self.statusItem.button.title = @"? kHz";
 
     NSMenu *menu = [[NSMenu alloc] init];
-
-    // Hidden until an update check finds a newer release.
-    self.updateItem = [[NSMenuItem alloc] initWithTitle:@"Update available"
-                                                 action:@selector(openUpdate:)
-                                          keyEquivalent:@""];
-    self.updateItem.target = self;
-    self.updateItem.hidden = YES;
-    [menu addItem:self.updateItem];
 
     self.deviceItem = [[NSMenuItem alloc] initWithTitle:@"No output device"
                                                  action:nil keyEquivalent:@""];
@@ -112,7 +84,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     [menu addItem:about];
 
     NSMenuItem *check = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
-                                                   action:@selector(checkForUpdatesManually:)
+                                                   action:@selector(checkForUpdates:)
                                             keyEquivalent:@""];
     check.target = self;
     [menu addItem:check];
@@ -133,7 +105,6 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     });
 
     [self attachToDefaultDevice];
-    [self checkForUpdatesIfDue];
 }
 
 - (NSString *)appName {
@@ -164,16 +135,6 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 
 #pragma mark - Updates
 
-- (void)checkForUpdatesIfDue {
-    NSDate *last = [[NSUserDefaults standardUserDefaults] objectForKey:kLastUpdateCheckKey];
-    if (last && -[last timeIntervalSinceNow] < kUpdateCheckInterval) return;
-    [self checkForUpdatesUserInitiated:NO];
-}
-
-- (void)checkForUpdatesManually:(id)sender {
-    [self checkForUpdatesUserInitiated:YES];
-}
-
 - (void)alert:(NSString *)message info:(NSString *)info downloadURL:(NSString *)url {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = message;
@@ -188,9 +149,10 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     }
 }
 
-// Notify-only: asks GitHub for the latest release and, if it's newer, offers to open the
-// release page. The user downloads and installs it themselves.
-- (void)checkForUpdatesUserInitiated:(BOOL)manual {
+// Only runs when the user clicks "Check for Updates…": the app makes no other network
+// requests of its own. Asks GitHub for the latest release and, if it's newer, offers to
+// open the release page. The user downloads and installs it themselves.
+- (void)checkForUpdates:(id)sender {
     NSURL *url = [NSURL URLWithString:
         [NSString stringWithFormat:@"https://api.github.com/repos/%@/releases/latest", kRepo]];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
@@ -209,46 +171,35 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![tag isKindOfClass:[NSString class]]) {
                 NSLog(@"update check failed (status %ld): %@", (long)status, error);
-                if (manual) {
-                    [self alert:@"Couldn't check for updates"
-                           info:@"Check your internet connection and try again."
-                    downloadURL:nil];
-                }
+                [self alert:@"Couldn't check for updates"
+                       info:@"Check your internet connection and try again."
+                downloadURL:nil];
                 return;
             }
-
-            [[NSUserDefaults standardUserDefaults] setObject:[NSDate date]
-                                                      forKey:kLastUpdateCheckKey];
 
             NSString *latest = [tag hasPrefix:@"v"] ? [tag substringFromIndex:1] : tag;
             BOOL newer = [latest compare:[self appVersion] options:NSNumericSearch]
                          == NSOrderedDescending;
 
-            if (newer) {
-                self.updateURL = [page isKindOfClass:[NSString class]] ? page
-                    : [NSString stringWithFormat:@"https://github.com/%@/releases/latest", kRepo];
-                self.updateItem.title = [NSString stringWithFormat:@"Update available: v%@…", latest];
-                self.updateItem.hidden = NO;
-                if (manual) {
-                    [self alert:[NSString stringWithFormat:@"Version %@ is available", latest]
-                           info:[NSString stringWithFormat:@"You have version %@.", [self appVersion]]
-                    downloadURL:self.updateURL];
-                }
-            } else if (manual) {
+            if (!newer) {
                 [self alert:@"You're up to date"
                        info:[NSString stringWithFormat:@"%@ %@ is the latest version.",
                              [self appName], [self appVersion]]
                 downloadURL:nil];
+                return;
             }
+
+            // Only ever open a page on this project's own GitHub repo.
+            NSString *repoPrefix = [NSString stringWithFormat:@"https://github.com/%@/", kRepo];
+            NSString *target = ([page isKindOfClass:[NSString class]] && [page hasPrefix:repoPrefix])
+                ? page : [repoPrefix stringByAppendingString:@"releases/latest"];
+
+            [self alert:[NSString stringWithFormat:@"Version %@ is available", latest]
+                   info:[NSString stringWithFormat:@"You have version %@.", [self appVersion]]
+            downloadURL:target];
         });
     }];
     [task resume];
-}
-
-- (void)openUpdate:(id)sender {
-    if (self.updateURL) {
-        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:self.updateURL]];
-    }
 }
 
 #pragma mark - Sample rate
