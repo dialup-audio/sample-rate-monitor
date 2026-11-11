@@ -1,4 +1,4 @@
-# Sample Rate Display
+# kHz Display
 
 Your audio interface's sample rate, in the macOS menubar. Always. The actual number.
 
@@ -24,7 +24,7 @@ That's it. Standard macOS menu, no settings window, no daemon.
 
 ## Install
 
-Download the latest zip from [Releases](https://github.com/dialup-audio/sample-rate-display/releases), unzip, and drag the app to Applications. To start it at login, add it under System Settings → General → Login Items.
+Download the latest zip from [Releases](https://github.com/dialup-audio/khz-display/releases), unzip, and drag the app to Applications. To start it at login, add it under System Settings → General → Login Items.
 
 ## Build from source
 
@@ -40,12 +40,12 @@ make run
 The alert rate is stored in the app's standard macOS preferences, nothing else is written to disk:
 
 ```bash
-defaults read audio.dialup.khzdisp alertRate      # e.g. 96000
-defaults delete audio.dialup.khzdisp              # reset
+defaults read audio.dialup.khz-display alertRate      # e.g. 96000
+defaults delete audio.dialup.khz-display              # reset
 ```
 
 Choosing **Off** in the menu clears it too.
 
 ## Updates
 
-The app never touches the internet on its own. **Check for Updates…** asks GitHub whether a newer release exists and, if so, offers to open the release page. Nothing is downloaded or installed automatically. That click is the only network request the app makes.
+Once a launch, the app asks GitHub whether a newer release exists and only speaks up if there is one; turn this off with **Check for Updates on Startup** in the app's menu, and the app makes no network requests at all. **Check for Updates Now** does the same on demand and always tells you the result. Nothing is downloaded or installed automatically: the Download button opens the product page on dialup.audio. These checks are the only network requests the app makes. The same menu has **Help** and **Report an Issue**, which open the project pages on dialup.audio.

@@ -2,8 +2,8 @@
 #import <CoreAudio/CoreAudio.h>
 
 // The alert rate (Hz) lives in NSUserDefaults under this key; 0 / unset means "no alert".
-//   defaults read audio.dialup.khzdisp alertRate
-//   defaults delete audio.dialup.khzdisp
+//   defaults read audio.dialup.khz-display alertRate
+//   defaults delete audio.dialup.khz-display
 static NSString * const kAlertRateKey = @"alertRate";
 
 static double LoadPreferredRate(void) {
@@ -20,8 +20,19 @@ static void SavePreferredRate(double hz) {
     }
 }
 
-static NSString * const kRepo    = @"dialup-audio/sample-rate-display";
+static NSString * const kRepo    = @"dialup-audio/khz-display";
 static NSString * const kSiteURL = @"https://dialup.audio";
+// Links go through dialup.audio (which redirects to GitHub for now) so they can be
+// repointed later without shipping a new version.
+static NSString * const kHelpURL     = @"https://dialup.audio/khz-display";
+static NSString * const kIssuesURL   = @"https://dialup.audio/khz-display/issues";
+static NSString * const kCheckOnStartupKey = @"checkUpdatesOnStartup";
+
+// On unless the user has turned it off.
+static BOOL CheckOnStartup() {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kCheckOnStartupKey];
+    return value ? [value boolValue] : YES;
+}
 
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     return { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
@@ -76,18 +87,26 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     [menu addItem:self.alertParent];
     [menu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *about = [[NSMenuItem alloc]
-        initWithTitle:[NSString stringWithFormat:@"About %@", self.appName]
-               action:@selector(showAbout:)
-        keyEquivalent:@""];
-    about.target = self;
-    [menu addItem:about];
-
-    NSMenuItem *check = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
-                                                   action:@selector(checkForUpdates:)
-                                            keyEquivalent:@""];
-    check.target = self;
-    [menu addItem:check];
+    // App submenu: about, updates, and links to the project.
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    NSMenuItem *(^add)(NSString *, SEL) = ^NSMenuItem *(NSString *title, SEL action) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
+        item.target = self;
+        [appMenu addItem:item];
+        return item;
+    };
+    add([NSString stringWithFormat:@"About %@", self.appName], @selector(showAbout:));
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    add(@"Check for Updates Now", @selector(checkForUpdates:));
+    NSMenuItem *startupCheck = add(@"Check for Updates on Startup", @selector(toggleUpdateOnStartup:));
+    startupCheck.state = CheckOnStartup()
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    add(@"Help", @selector(openHelp:));
+    add(@"Report an Issue", @selector(openIssues:));
+    NSMenuItem *appParent = [[NSMenuItem alloc] initWithTitle:self.appName action:nil keyEquivalent:@""];
+    appParent.submenu = appMenu;
+    [menu addItem:appParent];
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit"
@@ -105,10 +124,11 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     });
 
     [self attachToDefaultDevice];
+    if (CheckOnStartup()) [self checkForUpdatesSilently:YES];
 }
 
 - (NSString *)appName {
-    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: @"DialUp kHzDisp";
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: @"kHz Display";
 }
 
 - (NSString *)appVersion {
@@ -149,16 +169,37 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     }
 }
 
-// Only runs when the user clicks "Check for Updates…": the app makes no other network
-// requests of its own. Asks GitHub for the latest release and, if it's newer, offers to
-// open the release page. The user downloads and installs it themselves.
+// Runs when the user asks (or on startup, if they turned that on): the app makes no other
+// network requests of its own. Asks GitHub for the latest release and, if it's newer, offers to
+// open the product page. The user downloads and installs it themselves.
 - (void)checkForUpdates:(id)sender {
+    [self checkForUpdatesSilently:NO];
+}
+
+- (void)toggleUpdateOnStartup:(NSMenuItem *)sender {
+    BOOL on = sender.state != NSControlStateValueOn;
+    sender.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kCheckOnStartupKey];
+}
+
+- (void)openHelp:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:
+        [NSURL URLWithString:kHelpURL]];
+}
+
+- (void)openIssues:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:
+        [NSURL URLWithString:kIssuesURL]];
+}
+
+// With silent=YES (the startup check) it says nothing unless a newer version exists.
+- (void)checkForUpdatesSilently:(BOOL)silent {
     NSURL *url = [NSURL URLWithString:
         [NSString stringWithFormat:@"https://api.github.com/repos/%@/releases/latest", kRepo]];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = 15;
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"dialup-audio-sample-rate-display" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"dialup-audio-khz-display" forHTTPHeaderField:@"User-Agent"];
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -166,11 +207,11 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
         id json = (!error && data && status == 200)
             ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSString *tag = [json isKindOfClass:[NSDictionary class]] ? json[@"tag_name"] : nil;
-        NSString *page = [json isKindOfClass:[NSDictionary class]] ? json[@"html_url"] : nil;
-
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![tag isKindOfClass:[NSString class]]) {
                 NSLog(@"update check failed (status %ld): %@", (long)status, error);
+                if (silent) return;
                 [self alert:@"Couldn't check for updates"
                        info:@"Check your internet connection and try again."
                 downloadURL:nil];
@@ -182,6 +223,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
                          == NSOrderedDescending;
 
             if (!newer) {
+                if (silent) return;
                 [self alert:@"You're up to date"
                        info:[NSString stringWithFormat:@"%@ %@ is the latest version.",
                              [self appName], [self appVersion]]
@@ -189,14 +231,9 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
                 return;
             }
 
-            // Only ever open a page on this project's own GitHub repo.
-            NSString *repoPrefix = [NSString stringWithFormat:@"https://github.com/%@/", kRepo];
-            NSString *target = ([page isKindOfClass:[NSString class]] && [page hasPrefix:repoPrefix])
-                ? page : [repoPrefix stringByAppendingString:@"releases/latest"];
-
             [self alert:[NSString stringWithFormat:@"Version %@ is available", latest]
                    info:[NSString stringWithFormat:@"You have version %@.", [self appVersion]]
-            downloadURL:target];
+            downloadURL:kHelpURL];
         });
     }];
     [task resume];

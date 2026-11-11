@@ -7,7 +7,7 @@ build:
 	cmake --build $(BUILD_DIR) -j
 
 run: build
-	open ./$(BUILD_DIR)/sample-rate-display.app
+	open ./$(BUILD_DIR)/khz-display.app
 
 clean:
 	rm -rf $(BUILD_DIR)
