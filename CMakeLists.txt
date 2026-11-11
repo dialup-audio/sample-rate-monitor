@@ -1,20 +1,23 @@
 cmake_minimum_required(VERSION 3.20)
-project(rew_spl_menubar LANGUAGES OBJCXX)
+project(sample_rate_display LANGUAGES OBJCXX)
 
 set(CMAKE_OBJCXX_STANDARD 17)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
-add_executable(dock-sample-rate-display
+add_executable(sample-rate-display
     main.mm
 )
 
-target_link_libraries(dock-sample-rate-display
+target_compile_options(sample-rate-display PRIVATE -fobjc-arc)
+
+target_link_libraries(sample-rate-display
     "-framework Cocoa"
     "-framework Foundation"
+    "-framework CoreAudio"
 )
 
-set_target_properties(dock-sample-rate-display PROPERTIES
+set_target_properties(sample-rate-display PROPERTIES
     MACOSX_BUNDLE TRUE
-    MACOSX_BUNDLE_BUNDLE_NAME "REW SPL"
-    MACOSX_BUNDLE_GUI_IDENTIFIER "online.freeaol.dock-samplerate-menubar"
+    MACOSX_BUNDLE_BUNDLE_NAME "Sample Rate"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "dialup.audio.sample-rate-display"
 )
