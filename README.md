@@ -11,7 +11,7 @@ Free tools by [dialup.audio](https://dialup.audio).
 - Shows the sample rate of your default output device (`96 kHz`, `44.1 kHz`, ...) and updates the instant it changes.
 - **Set sample rate to…** switches the device to any rate it supports.
 - **Alert if not…** turns the menubar item red when the device is running at anything other than the rate you chose. Something changed your rate? You see it immediately.
-- The device name is shown in the menu.
+- The device name is shown in the menu, and **Output device** switches your Mac's default output (and system sound output) to any other output device, with a checkmark on the current one. This changes the system setting, same as System Settings → Sound.
 
 That's it. Standard macOS menu, no settings window, no daemon.
 

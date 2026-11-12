@@ -40,9 +40,10 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     return { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 }
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSMenuItem *deviceItem;
+@property (strong) NSMenu *outputMenu;
 @property (strong) NSMenu *setRateMenu;
 @property (strong) NSMenu *alertMenu;
 @property (strong) NSMenuItem *startupCheckItem;
@@ -54,6 +55,10 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
 @property double switchTarget;
 @property double switchPrevPreferred;
 @property NSUInteger switchGeneration;
+// Grace window after the default output device changes: the new device may take a moment to
+// settle on its rate, and the alert shouldn't flash red meanwhile.
+@property BOOL deviceSettling;
+@property NSUInteger settleGeneration;
 @property AudioDeviceID device;
 @property (copy) AudioObjectPropertyListenerBlock rateListener;
 @end
@@ -72,6 +77,15 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     self.deviceItem = [[NSMenuItem alloc] initWithTitle:@"No output device"
                                                  action:nil keyEquivalent:@""];
     [menu addItem:self.deviceItem];
+
+    // Output device: switches the system default output. The list is rebuilt each time
+    // the menu opens (menuNeedsUpdate:), so newly plugged-in devices show up.
+    self.outputMenu = [[NSMenu alloc] init];
+    self.outputMenu.delegate = self;
+    NSMenuItem *outputParent = [[NSMenuItem alloc] initWithTitle:@"Output device"
+                                                          action:nil keyEquivalent:@""];
+    outputParent.submenu = self.outputMenu;
+    [menu addItem:outputParent];
     [menu addItem:[NSMenuItem separatorItem]];
 
     // Both submenus are populated per-device in rebuildMenus.
@@ -123,6 +137,7 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &addr,
                                         dispatch_get_main_queue(),
                                         ^(UInt32 n, const AudioObjectPropertyAddress *a) {
+        [self beginDeviceSettling];
         [self attachToDefaultDevice];
     });
 
@@ -304,6 +319,91 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     }
 
     return [rates.allObjects sortedArrayUsingSelector:@selector(compare:)];
+}
+
+#pragma mark - Output device
+
+static BOOL DeviceHasOutput(AudioDeviceID dev) {
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput,
+                                     kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    return AudioObjectGetPropertyDataSize(dev, &a, 0, NULL, &size) == noErr && size > 0;
+}
+
+static NSString *DeviceName(AudioDeviceID dev) {
+    CFStringRef name = NULL;
+    UInt32 size = sizeof(name);
+    AudioObjectPropertyAddress a = Addr(kAudioObjectPropertyName);
+    if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &name) != noErr || !name) return nil;
+    return (__bridge_transfer NSString *)name;
+}
+
+// Rebuilt whenever the submenu is about to open, so the list and checkmark are current.
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != self.outputMenu) return;
+    [menu removeAllItems];
+
+    AudioObjectPropertyAddress a = Addr(kAudioHardwarePropertyDevices);
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size) != noErr || size == 0) {
+        [menu addItemWithTitle:@"No output devices" action:nil keyEquivalent:@""];
+        return;
+    }
+    NSMutableData *data = [NSMutableData dataWithLength:size];
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, data.mutableBytes) != noErr) return;
+    const AudioDeviceID *ids = (const AudioDeviceID *)data.bytes;
+    NSUInteger count = size / sizeof(AudioDeviceID);
+
+    for (NSUInteger i = 0; i < count; i++) {
+        if (!DeviceHasOutput(ids[i])) continue;
+        NSString *name = DeviceName(ids[i]);
+        if (!name) continue;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                      action:@selector(selectOutputDevice:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = @(ids[i]);
+        item.state = (ids[i] == self.device) ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:item];
+    }
+    if (menu.numberOfItems == 0) {
+        [menu addItemWithTitle:@"No output devices" action:nil keyEquivalent:@""];
+    }
+}
+
+// Sets both the default output and the system-sound output, like System Settings does.
+// The default-device listener then reattaches and refreshes the menubar item.
+- (void)beginDeviceSettling {
+    NSUInteger generation = ++self.settleGeneration;
+    self.deviceSettling = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.deviceSettling && self.settleGeneration == generation) {
+            self.deviceSettling = NO;
+            [self refresh];   // if it's still the wrong rate, the alert is real
+        }
+    });
+}
+
+- (void)selectOutputDevice:(NSMenuItem *)sender {
+    [self beginDeviceSettling];
+    AudioDeviceID dev = (AudioDeviceID)[sender.representedObject unsignedIntValue];
+    OSStatus err = noErr;
+    const AudioObjectPropertySelector sels[] = { kAudioHardwarePropertyDefaultOutputDevice,
+                                                 kAudioHardwarePropertyDefaultSystemOutputDevice };
+    for (AudioObjectPropertySelector sel : sels) {
+        AudioObjectPropertyAddress a = Addr(sel);
+        OSStatus e = AudioObjectSetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, sizeof(dev), &dev);
+        if (e != noErr) err = e;
+    }
+    if (err != noErr) {
+        NSLog(@"couldn't set output device: %d", (int)err);
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = [NSString stringWithFormat:@"Couldn't switch to %@", sender.title];
+        alert.informativeText = @"The device may be unavailable or controlled by its driver.";
+        [NSApp activateIgnoringOtherApps:YES];
+        [alert runModal];
+    }
 }
 
 - (void)rebuildMenus {
@@ -515,7 +615,13 @@ static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector sel) {
     NSString *text = [self formatRate:rate];
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:text];
 
-    if (!self.switching && self.preferredRate > 0 && fabs(rate - self.preferredRate) > 0.5) {
+    // Settling ends early once the device lands on the alert rate.
+    if (self.deviceSettling && self.preferredRate > 0 && fabs(rate - self.preferredRate) < 0.5) {
+        self.deviceSettling = NO;
+    }
+
+    if (!self.switching && !self.deviceSettling && self.preferredRate > 0
+        && fabs(rate - self.preferredRate) > 0.5) {
         [title addAttribute:NSBackgroundColorAttributeName
                       value:NSColor.systemRedColor
                       range:NSMakeRange(0, text.length)];
